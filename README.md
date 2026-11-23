@@ -1,83 +1,97 @@
 # www-mbrjun-cn-redirect
 
-`mbrjun.cn` 全站 301 到 `libmbr.com`，由 EdgeOne Pages 免费版承接（无服务器、无流量费）。
+Every `mbrjun.cn` hostname answers `301` to its `libmbr.com` counterpart. The project
+runs on EdgeOne Pages (free plan): no server, no traffic cost.
 
-一个项目绑定全部 `mbrjun.cn` 自定义域名，靠 `middleware.js` 按 Host 分流，路径与 query 原样保留。
+One Pages project is bound to all `mbrjun.cn` custom domains. `middleware.js` maps the
+incoming Host to the new location, so path and query survive the jump.
 
-## 目录
+## Files
 
-| 文件 | 作用 |
+| File | Purpose |
 |---|---|
-| `middleware.js` | 按 Host 映射 301 目标；`cos.mbrjun.cn/IMGS/*` → `lfs.libmbr.com/assets/*`；未知子域回落到 `www.libmbr.com` |
-| `edgeone.json` | 只保留响应头（HSTS、`Cache-Control: max-age=600`、`noindex`）；不含 redirects |
-| `index.html` | 最后兜底页（middleware 失效时 meta refresh 到 `www.libmbr.com`） |
-| `test-middleware.mjs` | 本地单测，校验 Host→目标映射与 path/query 保留 |
+| `middleware.js` | Host → destination map; `cos.mbrjun.cn/IMGS/*` → `lfs.libmbr.com/assets/*`; unknown subdomains fall back to `www.libmbr.com`; sets HSTS, `noindex` and a 10 minute cache on every 301 |
+| `edgeone.json` | Headers only (static page), no `redirects` |
+| `index.html` | Static fallback page, shown only on the project's own preview domains |
+| `test-middleware.mjs` | Local checks for mappings, path/query handling and headers |
+| `verify.sh` | Post-deploy check against a real hostname |
 
-## 为什么不把 301 写在 edgeone.json
+## Host map
 
-实测两条结论：
+| Host | Destination |
+|---|---|
+| `mbrjun.cn`, `www.mbrjun.cn`, `blog.mbrjun.cn` | `https://www.libmbr.com` |
+| `ha.mbrjun.cn` | `https://aqara.libmbr.com` |
+| `bw.mbrjun.cn` | `https://vault.libmbr.com` |
+| `cos.mbrjun.cn` | `https://lfs.libmbr.com` (`/IMGS/*` → `/assets/*`) |
+| `giscus.mbrjun.cn` | `https://hiroko.libmbr.com` |
+| `key.mbrjun.cn` | `https://kira.libmbr.com/tools/passkeymanagement/` (fixed URL) |
+| anything else under `*.mbrjun.cn` | `https://www.libmbr.com` |
 
-1. `edgeone.json` 的 `redirects` **会丢弃 query string**；
-2. **redirects 的执行顺序在 middleware 之前** —— 存在 `/*` 规则时，middleware 根本不会被调用（`?x=1` 被吞就是这个原因）。
+`key.mbrjun.cn` is a breaking refactor: the new app has a different route layout, so
+the old path is dropped and every request lands on the fixed URL.
 
-所以 301 全部交给 `middleware.js`：它按 Host 分流，并用 `pathname + search` 保留原始路径与 query。`edgeone.json` 里只留 header 规则。
+## Why 301 lives in middleware, not in edgeone.json
 
-调试：预览域或任意已绑定域名上带 `?__host=ha.mbrjun.cn` 可验证映射（该参数不会带进 Location）。
+Two measured facts:
 
-## 部署
+1. `edgeone.json` `redirects` **drop the query string**;
+2. `redirects` run **before** middleware — with a `/*` rule in place middleware is never
+   called, which is how the query was being lost.
 
-### 1. 项目已关联本仓库
-
-推送 `main` 即触发构建。产物就是 `index.html`，无需构建命令。
-
-### 2. 绑定域名（控制台 → 项目 → 域名管理 → 添加自定义域名）
-
-每个要接管的域名都加进来，总共免费版上限 200 个。当前应绑定：
+So middleware owns every redirect and `edgeone.json` keeps header rules for the static
+page only. Middleware responses carry their own headers because the platform does not
+forward `edgeone.json` headers to function responses:
 
 ```
-mbrjun.cn
-www.mbrjun.cn
-blog.mbrjun.cn
-ha.mbrjun.cn
-bw.mbrjun.cn
-cos.mbrjun.cn
+x-robots-tag: noindex
+cache-control: max-age=600
 ```
 
-其余历史子域（`hk` `kas` `arctanmai` `delightful` `delta` `qqlogin` `devfile` `api` `key` `kernel` `download` `hybot` `avatar` `a5cd…-srv` `moe` 等）按需添加；只要 Host 落在 `*.mbrjun.cn`，未配置的会统一 301 到 `www.libmbr.com`。
+HSTS is enforced by EdgeOne at site level and overrides whatever the function sets:
+`max-age=31536000; includeSubDomains; preload`. `mbrjun.cn` is already on the browser
+preload list, so change it in the site settings, not here.
 
-### 3. 改 DNS（DNSPod）
+## Static fallback page
 
-每个域名把 CNAME 指向控制台给出的本项目 CNAME（形如 `<hash>.<domain>.dnsoe2.com`）。
+`index.html` follows the style of the `legal-unavailable` page (English first, Chinese
+second, meta refresh to `www.libmbr.com`). It is never served on production hostnames:
+middleware answers `301` for every path, including `/index.html`. It only renders on the
+project's own preview domains (`*.edgeone.cool`, `*.edgeone.run`), because middleware
+calls `next()` for hosts outside `mbrjun.cn`.
 
-现有记录是旧项目 `d4e206e9.www.mbrjun.cn.dnsoe2.com` / `9d66e26d.blog.mbrjun.cn.dnsoe2.com`，改成新项目的值即可。
+## Deploy
 
-### 4. 清缓存
+1. The project is linked to this repository; pushing `main` triggers a build. The output
+   is `index.html`, no build command needed.
+2. Bind the hostnames under Project → Domain Management (200 custom domains on the free
+   plan). Minimum set: `mbrjun.cn`, `www`, `blog`, `ha`, `bw`, `cos`, `giscus`, `key`.
+3. Point each DNS record at the CNAME shown by the console.
+4. Purge the old cache after switching: the previous deployment answered with
+   `Cache-Control: max-age=31536000`.
 
-旧响应带 `Cache-Control: max-age=31536000`，切换后要在 EdgeOne 控制台清一次缓存，否则回访用户还会吃一年的 200 占位页。
-
-## 验收
+## Verify
 
 ```bash
-# 本地逻辑（不需要部署）
-node test-middleware.mjs
-
-# 部署后
-bash verify.sh www.mbrjun.cn
-
+node test-middleware.mjs          # local logic, no deploy needed
+bash verify.sh www.mbrjun.cn      # after deploy
 ```
 
-预期：
+Expected:
 
-| 请求 | 结果 |
+| Request | Result |
 |---|---|
 | `https://mbrjun.cn/` | `301 https://www.libmbr.com/` |
-| `https://www.mbrjun.cn/archives/520/?x=1` | `301 https://www.libmbr.com/archives/520/?x=1` |
-| `https://blog.mbrjun.cn/post/1` | `301 https://www.libmbr.com/post/1` |
-| `https://ha.mbrjun.cn/lovelace/0` | `301 https://ha.libmbr.com/lovelace/0` |
-| `https://bw.mbrjun.cn/` | `301 https://vault.libmbr.com/` |
+| `https://www.mbrjun.cn/archives/517/?x=1` | `301 https://www.libmbr.com/archives/517/?x=1` |
+| `https://ha.mbrjun.cn/lovelace/0` | `301 https://aqara.libmbr.com/lovelace/0` |
+| `https://giscus.mbrjun.cn/api/discussions?repo=1` | `301 https://hiroko.libmbr.com/api/discussions?repo=1` |
+| `https://key.mbrjun.cn/admin/settings` | `301 https://kira.libmbr.com/tools/passkeymanagement/` |
 | `https://cos.mbrjun.cn/IMGS/a.png` | `301 https://lfs.libmbr.com/assets/a.png` |
 
-## 额度（免费版）
+Debug helper: append `?__host=ha.mbrjun.cn` on any bound or preview domain to exercise a
+mapping; the parameter is removed from the `Location` header.
 
-- 自定义域名 200 个 / Edge Functions 300 万次执行每月 / 项目 40 个
-- 纯 301 场景每个请求 1 次函数执行，远低于配额
+## Limits (free plan)
+
+- 200 custom domains, 3M Edge Function executions per month, 40 projects.
+- A redirect costs one function execution per request, far below the quota.
